@@ -4,10 +4,12 @@ import os.path as osp
 import numpy as np
 
 sys.path.append("./")
+sys.path.append("./src")
 from r2_gaussian.gaussian.gaussian_model import GaussianModel
 from r2_gaussian.arguments import ModelParams
 from r2_gaussian.utils.graphics_utils import fetchPly
 from r2_gaussian.utils.system_utils import searchForMaxIteration
+from anatgs.anatomy.init import save_anatomy_init
 
 
 def initialize_gaussian(gaussians: GaussianModel, args: ModelParams, loaded_iter=None):
@@ -41,6 +43,17 @@ def initialize_gaussian(gaussians: GaussianModel, args: ModelParams, loaded_iter
         else:
             ply_path = args.ply_path
 
+        if args.anatomy_init:
+            if not args.seg_path:
+                raise ValueError("--anatomy_init requires --seg_path")
+            if osp.exists(osp.join(args.source_path, "meta_data.json")):
+                case_name = osp.basename(args.source_path.rstrip("/"))
+                out_init = osp.join(args.source_path, f"init_{case_name}_anat.npy")
+            else:
+                out_init = osp.join(osp.dirname(args.source_path), "init_anat.npy")
+            save_anatomy_init(args.seg_path, out_init)
+            ply_path = out_init
+
         assert osp.exists(
             ply_path
         ), f"Cannot find {ply_path} for initialization. Please specify a valid ply_path or generate point cloud with initialize_pcd.py."
@@ -51,11 +64,17 @@ def initialize_gaussian(gaussians: GaussianModel, args: ModelParams, loaded_iter
             point_cloud = np.load(ply_path)
             xyz = point_cloud[:, :3]
             density = point_cloud[:, 3:4]
+            if args.organ_tags_path:
+                tags_path = args.organ_tags_path
+            else:
+                tags_path = ply_path.replace(".npy", "_organ_tags.npy")
+            organ_tags = np.load(tags_path) if osp.exists(tags_path) else None
         elif ply_type == ".ply":
             point_cloud = fetchPly(ply_path)
             xyz = np.asarray(point_cloud.points)
             density = np.asarray(point_cloud.colors[:, :1])
+            organ_tags = None
 
-        gaussians.create_from_pcd(xyz, density, 1.0)
+        gaussians.create_from_pcd(xyz, density, 1.0, organ_tags=organ_tags)
 
     return loaded_iter

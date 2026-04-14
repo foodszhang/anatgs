@@ -4,6 +4,9 @@ build/
 .vscode/
 data/
 output
+outputs/
+logs/
+tmp/
 *.zip
 TIGRE*
 volume_processed/
@@ -11,3 +14,4 @@ volume_raw
 FIPS_raw
 FIPS_processed
 other_scripts
+results/geometry_vis/

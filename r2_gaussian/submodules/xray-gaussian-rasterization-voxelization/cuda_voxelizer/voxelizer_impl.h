@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <iostream>
 #include <vector>
 #include "voxelizer.h"

@@ -1,0 +1,2 @@
+vanilla_3dgs: 3800
+anatgs_oracle: 3800

@@ -1,0 +1,14 @@
+name: gs_anatgs
+iterations: 30000
+densify_until_iter: 15000
+densify_from_iter: 500
+densification_interval: 100
+densify_grad_threshold: 5.0e-5
+density_min_threshold: 1.0e-5
+max_num_gaussians: 500000
+anatomy_init: true
+organ_aware_prune: true
+protected_organs: "2,6,7"
+background_organ: 0
+background_density_scale: 2.0
+

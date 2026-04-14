@@ -24,6 +24,9 @@ class ModelParams(ParamGroup):
         self._model_path = ""
         self.data_device = "cuda"
         self.ply_path = ""  # Path to initialization point cloud (if None, we will try to find `init_*.npy`.)
+        self.seg_path = ""  # Optional GT segmentation path for anatomy-guided initialization.
+        self.organ_tags_path = ""  # Optional sidecar .npy with per-gaussian organ labels.
+        self.anatomy_init = False  # Build init point cloud from seg_path when enabled.
         self.scale_min = 0.0005  # percent of volume size
         self.scale_max = 0.5  # percent of volume size
         self.eval = True
@@ -69,6 +72,10 @@ class OptimizationParams(ParamGroup):
         self.max_screen_size = None
         self.max_scale = None  # percent of volume size
         self.max_num_gaussians = 500_000
+        self.organ_aware_prune = False
+        self.protected_organs = "2,6,7"
+        self.background_organ = 0
+        self.background_density_scale = 2.0
         super().__init__(parser, "Optimization Parameters")
 
 

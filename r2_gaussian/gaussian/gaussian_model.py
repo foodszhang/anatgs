@@ -68,6 +68,7 @@ class GaussianModel:
         self._scaling = torch.empty(0)  # 3d scale
         self._rotation = torch.empty(0)  # rotation expressed in quaternions
         self._density = torch.empty(0)  # density
+        self._organ_tags = torch.empty(0, dtype=torch.long, device="cuda")
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
@@ -82,6 +83,7 @@ class GaussianModel:
             self._scaling,
             self._rotation,
             self._density,
+            self._organ_tags,
             self.max_radii2D,
             self.xyz_gradient_accum,
             self.denom,
@@ -96,6 +98,7 @@ class GaussianModel:
             self._scaling,
             self._rotation,
             self._density,
+            self._organ_tags,
             self.max_radii2D,
             xyz_gradient_accum,
             denom,
@@ -125,12 +128,16 @@ class GaussianModel:
     def get_density(self):
         return self.density_activation(self._density)
 
+    @property
+    def get_organ_tags(self):
+        return self._organ_tags
+
     def get_covariance(self, scaling_modifier=1):
         return self.covariance_activation(
             self.get_scaling, scaling_modifier, self._rotation
         )
 
-    def create_from_pcd(self, xyz, density, spatial_lr_scale: float):
+    def create_from_pcd(self, xyz, density, spatial_lr_scale: float, organ_tags=None):
         self.spatial_lr_scale = spatial_lr_scale
 
         fused_point_cloud = torch.tensor(xyz).float().cuda()
@@ -161,6 +168,10 @@ class GaussianModel:
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._density = nn.Parameter(fused_density.requires_grad_(True))
+        if organ_tags is None:
+            self._organ_tags = torch.zeros((fused_point_cloud.shape[0],), dtype=torch.long, device="cuda")
+        else:
+            self._organ_tags = torch.as_tensor(organ_tags, dtype=torch.long, device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
         #! Generate one gaussian for debugging purpose
@@ -275,6 +286,7 @@ class GaussianModel:
             "density": densities,
             "scale": scale,
             "rotation": rotation,
+            "organ_tags": t2a(self._organ_tags),
             "scale_bound": self.scale_bound,
         }
         with open(path, "wb") as f:
@@ -314,6 +326,11 @@ class GaussianModel:
                 data["rotation"], dtype=torch.float, device="cuda"
             ).requires_grad_(True)
         )
+        organ_tags = data.get("organ_tags")
+        if organ_tags is None:
+            self._organ_tags = torch.zeros((self._xyz.shape[0],), dtype=torch.long, device="cuda")
+        else:
+            self._organ_tags = torch.tensor(organ_tags, dtype=torch.long, device="cuda")
         self.scale_bound = data["scale_bound"]
         self.setup_functions()  # Reset activation functions
 
@@ -367,6 +384,7 @@ class GaussianModel:
 
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
+        self._organ_tags = self._organ_tags[valid_points_mask]
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -409,6 +427,7 @@ class GaussianModel:
         new_scaling,
         new_rotation,
         new_max_radii2D,
+        new_organ_tags=None,
     ):
         d = {
             "xyz": new_xyz,
@@ -426,6 +445,9 @@ class GaussianModel:
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.cat([self.max_radii2D, new_max_radii2D], dim=-1)
+        if new_organ_tags is None:
+            new_organ_tags = torch.zeros((new_xyz.shape[0],), dtype=torch.long, device="cuda")
+        self._organ_tags = torch.cat([self._organ_tags, new_organ_tags.to(device="cuda", dtype=torch.long)], dim=0)
 
     def densify_and_split(self, grads, grad_threshold, densify_scale_threshold, N=2):
         n_init_points = self.get_xyz.shape[0]
@@ -454,6 +476,7 @@ class GaussianModel:
             self.get_density[selected_pts_mask].repeat(N, 1) * (1 / N)
         )
         new_max_radii2D = self.max_radii2D[selected_pts_mask].repeat(N)
+        new_organ_tags = self._organ_tags[selected_pts_mask].repeat(N)
 
         self.densification_postfix(
             new_xyz,
@@ -461,6 +484,7 @@ class GaussianModel:
             new_scaling,
             new_rotation,
             new_max_radii2D,
+            new_organ_tags,
         )
 
         prune_filter = torch.cat(
@@ -489,6 +513,7 @@ class GaussianModel:
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
         new_max_radii2D = self.max_radii2D[selected_pts_mask]
+        new_organ_tags = self._organ_tags[selected_pts_mask]
 
         self._density[selected_pts_mask] = new_densities
 
@@ -498,6 +523,7 @@ class GaussianModel:
             new_scaling,
             new_rotation,
             new_max_radii2D,
+            new_organ_tags,
         )
 
     def densify_and_prune(
@@ -509,45 +535,70 @@ class GaussianModel:
         max_num_gaussians,
         densify_scale_threshold,
         bbox=None,
+        protected_organs=None,
+        background_organ=0,
+        background_density_scale=2.0,
+        enable_densify=True,
+        enable_prune=True,
     ):
+        n_start = int(self.get_xyz.shape[0])
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
         # Densify Gaussians if Gaussians are fewer than threshold
-        if densify_scale_threshold:
+        if enable_densify and densify_scale_threshold:
             if not max_num_gaussians or (
                 max_num_gaussians and grads.shape[0] < max_num_gaussians
             ):
                 self.densify_and_clone(grads, max_grad, densify_scale_threshold)
                 self.densify_and_split(grads, max_grad, densify_scale_threshold)
+        n_after_densify = int(self.get_xyz.shape[0])
 
-        # Prune gaussians with too small density
-        prune_mask = (self.get_density < min_density).squeeze()
-        # Prune gaussians outside the bbox
-        if bbox is not None:
-            xyz = self.get_xyz
-            prune_mask_xyz = (
-                (xyz[:, 0] < bbox[0, 0])
-                | (xyz[:, 0] > bbox[1, 0])
-                | (xyz[:, 1] < bbox[0, 1])
-                | (xyz[:, 1] > bbox[1, 1])
-                | (xyz[:, 2] < bbox[0, 2])
-                | (xyz[:, 2] > bbox[1, 2])
-            )
+        prune_mask = torch.zeros((self.get_density.shape[0],), dtype=torch.bool, device=self.get_density.device)
+        if enable_prune:
+            # Prune gaussians with too small density
+            prune_mask = (self.get_density < min_density).squeeze()
+            if protected_organs is not None and len(protected_organs) > 0:
+                protect = torch.zeros_like(prune_mask, dtype=torch.bool)
+                for organ in protected_organs:
+                    protect |= self._organ_tags == int(organ)
+                prune_mask = prune_mask & (~protect)
+            bg = self._organ_tags == int(background_organ)
+            if bg.any():
+                prune_mask = prune_mask | ((self.get_density.squeeze() < float(min_density) * float(background_density_scale)) & bg)
+            # Prune gaussians outside the bbox
+            if bbox is not None:
+                xyz = self.get_xyz
+                prune_mask_xyz = (
+                    (xyz[:, 0] < bbox[0, 0])
+                    | (xyz[:, 0] > bbox[1, 0])
+                    | (xyz[:, 1] < bbox[0, 1])
+                    | (xyz[:, 1] > bbox[1, 1])
+                    | (xyz[:, 2] < bbox[0, 2])
+                    | (xyz[:, 2] > bbox[1, 2])
+                )
 
-            prune_mask = prune_mask | prune_mask_xyz
+                prune_mask = prune_mask | prune_mask_xyz
 
-        if max_screen_size:
-            big_points_vs = self.max_radii2D > max_screen_size
-            prune_mask = torch.logical_or(prune_mask, big_points_vs)
-        if max_scale:
-            big_points_ws = self.get_scaling.max(dim=1).values > max_scale
-            prune_mask = torch.logical_or(prune_mask, big_points_ws)
+            if max_screen_size:
+                big_points_vs = self.max_radii2D > max_screen_size
+                prune_mask = torch.logical_or(prune_mask, big_points_vs)
+            if max_scale:
+                big_points_ws = self.get_scaling.max(dim=1).values > max_scale
+                prune_mask = torch.logical_or(prune_mask, big_points_ws)
+        prune_count = int(prune_mask.sum().item())
         self.prune_points(prune_mask)
+        n_end = int(self.get_xyz.shape[0])
 
         torch.cuda.empty_cache()
 
-        return grads
+        return {
+            "grads": grads,
+            "densify_added": max(0, n_after_densify - n_start),
+            "prune_removed": max(prune_count, n_after_densify - n_end),
+            "num_before": n_start,
+            "num_after": n_end,
+        }
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(

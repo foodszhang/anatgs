@@ -11,6 +11,7 @@
 
 import os
 import os.path as osp
+import csv
 import torch
 from random import randint
 import sys
@@ -20,6 +21,7 @@ import numpy as np
 import yaml
 
 sys.path.append("./")
+sys.path.append("./src")
 from r2_gaussian.arguments import ModelParams, OptimizationParams, PipelineParams
 from r2_gaussian.gaussian import GaussianModel, render, query, initialize_gaussian
 from r2_gaussian.utils.general_utils import safe_state
@@ -31,6 +33,28 @@ from r2_gaussian.utils.image_utils import metric_vol, metric_proj
 from r2_gaussian.utils.plot_utils import show_two_slice
 
 
+def _psnr_from_mse(mse: float) -> float:
+    if mse <= 1e-12:
+        return float("inf")
+    return float(10.0 * np.log10(1.0 / mse))
+
+
+def _projection_eval(cameras, gaussians, pipe):
+    if cameras is None or len(cameras) == 0:
+        return float("nan"), float("nan")
+    proj_l1 = []
+    proj_mse = []
+    for cam in cameras:
+        render_pkg = render(cam, gaussians, pipe)
+        pred = render_pkg["render"]
+        gt = cam.original_image.cuda()
+        proj_l1.append(float(torch.mean(torch.abs(pred - gt)).item()))
+        proj_mse.append(float(torch.mean((pred - gt) ** 2).item()))
+    loss_val = float(np.mean(proj_l1))
+    psnr_val = _psnr_from_mse(float(np.mean(proj_mse)))
+    return loss_val, psnr_val
+
+
 def training(
     dataset: ModelParams,
     opt: OptimizationParams,
@@ -40,6 +64,11 @@ def training(
     saving_iterations,
     checkpoint_iterations,
     checkpoint,
+    eval_interval=100,
+    early_stop=False,
+    debug_metrics_csv="",
+    disable_densify=False,
+    disable_prune=False,
 ):
     first_iter = 0
 
@@ -86,6 +115,9 @@ def training(
         tv_vol_sVoxel = torch.tensor(scanner_cfg["dVoxel"]) * tv_vol_nVoxel
 
     # Train
+    protected_organs: list[int] = []
+    if getattr(opt, "protected_organs", ""):
+        protected_organs = [int(x) for x in str(opt.protected_organs).split(",") if x.strip() != ""]
     iter_start = torch.cuda.Event(enable_timing=True)
     iter_end = torch.cuda.Event(enable_timing=True)
     ckpt_save_path = osp.join(scene.model_path, "ckpt")
@@ -94,6 +126,48 @@ def training(
     progress_bar = tqdm(range(0, opt.iterations), desc="Train", leave=False)
     progress_bar.update(first_iter)
     first_iter += 1
+    loss_history: dict[int, float] = {}
+    plateau_count = 0
+    train_cameras = scene.getTrainCameras()
+    test_cameras = scene.getTestCameras()
+    fixed_val_cameras = (
+        test_cameras[: min(3, len(test_cameras))]
+        if test_cameras and len(test_cameras) > 0
+        else train_cameras[: min(3, len(train_cameras))]
+    )
+    debug_csv_path = debug_metrics_csv.strip() if isinstance(debug_metrics_csv, str) else ""
+    if not debug_csv_path:
+        debug_csv_path = osp.join(scene.model_path, "debug_metrics.csv")
+    debug_csv_dir = osp.dirname(debug_csv_path)
+    if debug_csv_dir:
+        os.makedirs(debug_csv_dir, exist_ok=True)
+    with open(debug_csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "iter",
+                "proj_loss_train",
+                "proj_loss_val",
+                "proj_psnr_val",
+                "global_psnr",
+                "voxel_mae",
+                "voxel_mean",
+                "voxel_std",
+                "voxel_min",
+                "voxel_max",
+                "voxel_p1",
+                "voxel_p50",
+                "voxel_p99",
+                "num_gaussians",
+                "density_mean",
+                "density_std",
+                "scale_mean",
+                "scale_std",
+                "densify_added",
+                "prune_removed",
+                "lr_xyz",
+            ]
+        )
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
 
@@ -152,12 +226,14 @@ def training(
                 gaussians.max_radii2D[visibility_filter], radii[visibility_filter]
             )
             gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+            densify_added = 0
+            prune_removed = 0
             if iteration < opt.densify_until_iter:
                 if (
                     iteration > opt.densify_from_iter
                     and iteration % opt.densification_interval == 0
                 ):
-                    gaussians.densify_and_prune(
+                    adaptive_stats = gaussians.densify_and_prune(
                         opt.densify_grad_threshold,
                         opt.density_min_threshold,
                         opt.max_screen_size,
@@ -165,7 +241,14 @@ def training(
                         opt.max_num_gaussians,
                         densify_scale_threshold,
                         bbox,
+                        protected_organs=protected_organs if getattr(opt, "organ_aware_prune", False) else None,
+                        background_organ=int(getattr(opt, "background_organ", 0)),
+                        background_density_scale=float(getattr(opt, "background_density_scale", 2.0)),
+                        enable_densify=not bool(disable_densify),
+                        enable_prune=not bool(disable_prune),
                     )
+                    densify_added = int(adaptive_stats.get("densify_added", 0))
+                    prune_removed = int(adaptive_stats.get("prune_removed", 0))
             if gaussians.get_density.shape[0] == 0:
                 raise ValueError(
                     "No Gaussian left. Change adaptive control hyperparameters!"
@@ -175,6 +258,9 @@ def training(
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none=True)
+
+            proj_loss_now = float(loss["render"].item())
+            loss_history[iteration] = proj_loss_now
 
             # Save gaussians
             if iteration in saving_iterations or iteration == opt.iterations:
@@ -217,6 +303,94 @@ def training(
                 lambda x, y: render(x, y, pipe),
                 queryfunc,
             )
+
+            if int(eval_interval) > 0 and iteration % int(eval_interval) == 0:
+                vol_pred = queryfunc(scene.gaussians)["vol"]
+                vol_gt = scene.vol_gt
+                mse = torch.mean((vol_gt - vol_pred) ** 2).item()
+                global_psnr = _psnr_from_mse(mse)
+                voxel_mae = float(torch.mean(torch.abs(vol_gt - vol_pred)).item())
+                voxel_mean = float(vol_pred.mean().item())
+                voxel_std = float(vol_pred.std().item())
+                voxel_min = float(vol_pred.min().item())
+                voxel_max = float(vol_pred.max().item())
+                voxel_p1 = float(torch.quantile(vol_pred, 0.01).item())
+                voxel_p50 = float(torch.quantile(vol_pred, 0.50).item())
+                voxel_p99 = float(torch.quantile(vol_pred, 0.99).item())
+                proj_loss_val, proj_psnr_val = _projection_eval(
+                    fixed_val_cameras, gaussians, pipe
+                )
+                density = gaussians.get_density
+                scales = gaussians.get_scaling
+                density_mean = float(density.mean().item())
+                density_std = float(density.std().item())
+                scale_mean = float(scales.mean().item())
+                scale_std = float(scales.std().item())
+                lr_xyz = float(
+                    next(
+                        pg["lr"]
+                        for pg in gaussians.optimizer.param_groups
+                        if pg.get("name") == "xyz"
+                    )
+                )
+                print(
+                    f"[iter {iteration}] proj_loss={proj_loss_now:.4f}  val_proj_loss={proj_loss_val:.4f}  val_proj_PSNR={proj_psnr_val:.2f} dB  global_PSNR={global_psnr:.2f} dB",
+                    flush=True,
+                )
+                if tb_writer:
+                    tb_writer.add_scalar("monitor/global_psnr", global_psnr, iteration)
+                    tb_writer.add_scalar("monitor/val_proj_psnr", proj_psnr_val, iteration)
+                    tb_writer.add_scalar("monitor/voxel_mae", voxel_mae, iteration)
+
+                with open(debug_csv_path, "a", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(
+                        [
+                            iteration,
+                            proj_loss_now,
+                            proj_loss_val,
+                            proj_psnr_val,
+                            global_psnr,
+                            voxel_mae,
+                            voxel_mean,
+                            voxel_std,
+                            voxel_min,
+                            voxel_max,
+                            voxel_p1,
+                            voxel_p50,
+                            voxel_p99,
+                            int(gaussians.get_density.shape[0]),
+                            density_mean,
+                            density_std,
+                            scale_mean,
+                            scale_std,
+                            int(densify_added),
+                            int(prune_removed),
+                            lr_xyz,
+                        ]
+                    )
+
+                if early_stop:
+                    past_iter = iteration - 300
+                    if past_iter in loss_history:
+                        loss_300_ago = float(loss_history[past_iter])
+                        if loss_300_ago > 0.0:
+                            rel_improve = (loss_300_ago - proj_loss_now) / loss_300_ago
+                        else:
+                            rel_improve = float("inf")
+                        if rel_improve < 0.001:
+                            plateau_count += 1
+                        else:
+                            plateau_count = 0
+
+                        if plateau_count >= 3:
+                            print(
+                                f"[EARLY STOP] at iter {iteration}, loss plateau detected",
+                                flush=True,
+                            )
+                            scene.save(iteration, queryfunc)
+                            progress_bar.close()
+                            break
 
 
 def training_report(
@@ -377,7 +551,15 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default=None)
     parser.add_argument("--config", type=str, default=None)
+    parser.add_argument("--max_iterations", type=int, default=None)
+    parser.add_argument("--eval_interval", type=int, default=100)
+    parser.add_argument("--early_stop", action="store_true", default=False)
+    parser.add_argument("--debug_metrics_csv", type=str, default="")
+    parser.add_argument("--disable_densify", action="store_true", default=False)
+    parser.add_argument("--disable_prune", action="store_true", default=False)
     args = parser.parse_args(sys.argv[1:])
+    if args.max_iterations is not None:
+        args.iterations = int(args.max_iterations)
     args.save_iterations.append(args.iterations)
     args.test_iterations.append(args.iterations)
     args.test_iterations.append(1)
@@ -409,6 +591,11 @@ if __name__ == "__main__":
         args.save_iterations,
         args.checkpoint_iterations,
         args.start_checkpoint,
+        args.eval_interval,
+        args.early_stop,
+        args.debug_metrics_csv,
+        args.disable_densify,
+        args.disable_prune,
     )
 
     # All done
