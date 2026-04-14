@@ -1,0 +1,4 @@
+run_name,convergence_csv,init_name,densify_prune,init_voxel_psnr,iter100_voxel_psnr,iter1000_voxel_psnr,best_voxel_psnr,best_iter,final_iter,final_voxel_psnr,final_proj_psnr_val,final_num_gaussians
+strict_default_fdk,results/strict_vanilla_case001_50v_convergence.csv,fdk_init,on,13.580083847045898,13.269323102679175,13.03265908233652,13.269323102679175,100,30000,12.94355557363566,52.12159798803067,111942
+strict_no_densify_no_prune_fdk,results/strict_p1_no_dp_2k_convergence.csv,fdk_init,off,13.580083847045898,13.269389391053195,13.033502523959337,13.269389391053195,100,30000,12.952027541348084,49.98864246384218,50000
+strict_default_random_init,results/strict_p1_random_2k_convergence.csv,random_init,on,-10.451083183288574,5.238400743477111,12.914803227467855,13.30431669982132,300,30000,12.92240328443031,54.45253487187497,233115

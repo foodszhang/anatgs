@@ -558,11 +558,6 @@ if __name__ == "__main__":
     parser.add_argument("--disable_densify", action="store_true", default=False)
     parser.add_argument("--disable_prune", action="store_true", default=False)
     args = parser.parse_args(sys.argv[1:])
-    if args.max_iterations is not None:
-        args.iterations = int(args.max_iterations)
-    args.save_iterations.append(args.iterations)
-    args.test_iterations.append(args.iterations)
-    args.test_iterations.append(1)
     # fmt: on
 
     # Initialize system state (RNG)
@@ -575,6 +570,13 @@ if __name__ == "__main__":
         cfg = load_config(args.config)
         for key in list(cfg.keys()):
             args_dict[key] = cfg[key]
+    if args.max_iterations is not None:
+        args_dict["iterations"] = int(args.max_iterations)
+    args_dict["save_iterations"] = list(args_dict.get("save_iterations", []))
+    args_dict["test_iterations"] = list(args_dict.get("test_iterations", []))
+    args_dict["save_iterations"].append(args_dict["iterations"])
+    args_dict["test_iterations"].append(args_dict["iterations"])
+    args_dict["test_iterations"].append(1)
 
     # Set up logging writer
     tb_writer = prepare_output_and_logger(args)

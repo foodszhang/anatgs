@@ -1,0 +1,17 @@
+name: gs_r2_strict
+
+# Strict vanilla R²-Gaussian baseline reproduction (no AnatGS modules)
+iterations: 30000
+densify_until_iter: 15000
+densify_from_iter: 500
+densification_interval: 100
+densify_grad_threshold: 5.0e-5
+density_min_threshold: 1.0e-5
+max_num_gaussians: 500000
+
+# Keep vanilla behavior explicit
+anatomy_init: false
+organ_aware_prune: false
+seg_path: ""
+organ_tags_path: ""
+protected_organs: ""
