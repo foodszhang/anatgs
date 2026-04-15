@@ -32,7 +32,8 @@ def anatomy_guided_init(
     params = organ_params or DEFAULT_ORGAN_PARAMS
     rng = np.random.default_rng(int(seed))
     boundary = _boundary_mask(seg)
-    shape = np.array(seg.shape, dtype=np.float32)
+    shape_zyx = np.array(seg.shape, dtype=np.float32)
+    shape_xyz = shape_zyx[[2, 1, 0]]
 
     means: list[np.ndarray] = []
     densities: list[np.ndarray] = []
@@ -65,9 +66,10 @@ def anatomy_guided_init(
             pts = np.concatenate([pts, bpts], axis=0)
             is_boundary = np.concatenate([is_boundary, np.ones((n_extra,), dtype=bool)], axis=0)
 
-        # Match R2 init coordinate convention: voxel index space -> world in [-1, 1].
-        pts_world = (pts / shape[None, :]) * 2.0 - 1.0
-        pts_world = np.clip(pts_world, -1.0, 1.0 - 2.0 / float(np.max(shape)))
+        # seg is [z,y,x]; convert to xyz before mapping into R2 world coordinates.
+        pts_xyz = pts[:, [2, 1, 0]]
+        pts_world = (pts_xyz / shape_xyz[None, :]) * 2.0 - 1.0
+        pts_world = np.clip(pts_world, -1.0, 1.0 - 2.0 / float(np.max(shape_xyz)))
         means.append(pts_world.astype(np.float32))
         densities.append(np.full((pts.shape[0], 1), float(cfg["init_opacity"]), dtype=np.float32))
         organ_tags.append(np.full((pts.shape[0],), int(organ_id), dtype=np.int16))

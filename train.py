@@ -19,6 +19,7 @@ from tqdm import tqdm
 from argparse import ArgumentParser
 import numpy as np
 import yaml
+import torch.nn.functional as F
 
 sys.path.append("./")
 sys.path.append("./src")
@@ -55,6 +56,28 @@ def _projection_eval(cameras, gaussians, pipe):
     return loss_val, psnr_val
 
 
+def _region_variance_loss(
+    vol_pred: torch.Tensor,
+    seg_xyz: torch.Tensor,
+    organ_ids: list[int],
+    min_voxels: int = 100,
+) -> torch.Tensor:
+    total = torch.zeros((), dtype=vol_pred.dtype, device=vol_pred.device)
+    n_valid = 0
+    for organ_id in organ_ids:
+        mask = seg_xyz == int(organ_id)
+        if int(mask.sum().item()) < int(min_voxels):
+            continue
+        values = vol_pred[mask]
+        if values.numel() < int(min_voxels):
+            continue
+        total = total + torch.var(values, unbiased=False)
+        n_valid += 1
+    if n_valid == 0:
+        return torch.zeros((), dtype=vol_pred.dtype, device=vol_pred.device)
+    return total / float(n_valid)
+
+
 def training(
     dataset: ModelParams,
     opt: OptimizationParams,
@@ -69,6 +92,12 @@ def training(
     debug_metrics_csv="",
     disable_densify=False,
     disable_prune=False,
+    lambda_coarse_anchor=0.0,
+    coarse_anchor_size=32,
+    lambda_region=0.0,
+    region_vol_size=64,
+    region_loss_interval=1,
+    region_organs="2,3,4,5,6,7,8,9",
 ):
     first_iter = 0
 
@@ -105,6 +134,67 @@ def training(
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
         print(f"Load checkpoint {osp.basename(checkpoint)}.")
+    use_coarse_anchor = float(lambda_coarse_anchor) > 0.0
+    coarse_anchor_gt = None
+    coarse_nVoxel = None
+    coarse_sVoxel = None
+    if use_coarse_anchor:
+        coarse_size = int(coarse_anchor_size)
+        if coarse_size < 8:
+            raise ValueError("coarse_anchor_size must be >= 8")
+        coarse_nVoxel = torch.tensor(
+            [coarse_size, coarse_size, coarse_size], dtype=torch.int32
+        )
+        coarse_sVoxel = torch.tensor(scanner_cfg["sVoxel"]) * (
+            coarse_nVoxel.float() / torch.tensor(scanner_cfg["nVoxel"]).float()
+        )
+        with torch.no_grad():
+            coarse_anchor_gt = query(
+                gaussians,
+                scanner_cfg["offOrigin"],
+                coarse_nVoxel,
+                coarse_sVoxel,
+                pipe,
+            )["vol"].detach()
+
+    use_region = float(lambda_region) > 0.0
+    region_seg_xyz = None
+    region_nVoxel = None
+    region_sVoxel = None
+    region_organ_ids: list[int] = []
+    if use_region:
+        if not dataset.seg_path:
+            raise ValueError("--lambda_region > 0 requires --seg_path")
+        seg_np = np.load(dataset.seg_path).astype(np.int16)
+        if seg_np.ndim != 3:
+            raise ValueError(f"seg_path must be 3D label map, got {seg_np.shape}")
+        seg_xyz_full = torch.from_numpy(seg_np.transpose(2, 1, 0)).to(device="cuda")
+        region_size = int(region_vol_size)
+        if region_size < 8:
+            raise ValueError("--region_vol_size must be >= 8")
+        region_seg_xyz = (
+            F.interpolate(
+                seg_xyz_full.float().unsqueeze(0).unsqueeze(0),
+                size=(region_size, region_size, region_size),
+                mode="nearest",
+            )
+            .squeeze(0)
+            .squeeze(0)
+            .long()
+        )
+        region_nVoxel = torch.tensor(
+            [region_size, region_size, region_size], dtype=torch.int32
+        )
+        region_sVoxel = torch.tensor(scanner_cfg["sVoxel"])
+        region_organ_ids = [
+            int(x) for x in str(region_organs).split(",") if x.strip() != ""
+        ]
+        if not region_organ_ids:
+            raise ValueError("--region_organs produced empty organ id list")
+        print(
+            f"Use region variance loss: lambda={float(lambda_region):.4f}, "
+            f"vol_size={region_size}, organs={region_organ_ids}, interval={int(region_loss_interval)}"
+        )
 
     # Set up loss
     use_tv = opt.lambda_tv > 0
@@ -166,6 +256,7 @@ def training(
                 "densify_added",
                 "prune_removed",
                 "lr_xyz",
+                "loss_coarse_anchor",
             ]
         )
     for iteration in range(first_iter, opt.iterations + 1):
@@ -214,6 +305,33 @@ def training(
             loss_tv = tv_3d_loss(vol_pred, reduction="mean")
             loss["tv"] = loss_tv
             loss["total"] = loss["total"] + opt.lambda_tv * loss_tv
+        if use_coarse_anchor:
+            coarse_pred = query(
+                gaussians,
+                scanner_cfg["offOrigin"],
+                coarse_nVoxel,
+                coarse_sVoxel,
+                pipe,
+            )["vol"]
+            loss_coarse = l1_loss(coarse_pred, coarse_anchor_gt)
+            loss["coarse_anchor"] = loss_coarse
+            loss["total"] = loss["total"] + float(lambda_coarse_anchor) * loss_coarse
+        if use_region and (iteration % max(1, int(region_loss_interval)) == 0):
+            region_pred = query(
+                gaussians,
+                scanner_cfg["offOrigin"],
+                region_nVoxel,
+                region_sVoxel,
+                pipe,
+            )["vol"]
+            loss_region = _region_variance_loss(
+                region_pred,
+                region_seg_xyz,
+                organ_ids=region_organ_ids,
+                min_voxels=100,
+            )
+            loss["region"] = loss_region
+            loss["total"] = loss["total"] + float(lambda_region) * loss_region
 
         loss["total"].backward()
 
@@ -367,6 +485,7 @@ def training(
                             int(densify_added),
                             int(prune_removed),
                             lr_xyz,
+                            float(loss.get("coarse_anchor", torch.tensor(0.0)).item()),
                         ]
                     )
 
@@ -557,6 +676,12 @@ if __name__ == "__main__":
     parser.add_argument("--debug_metrics_csv", type=str, default="")
     parser.add_argument("--disable_densify", action="store_true", default=False)
     parser.add_argument("--disable_prune", action="store_true", default=False)
+    parser.add_argument("--lambda_coarse_anchor", type=float, default=0.0)
+    parser.add_argument("--coarse_anchor_size", type=int, default=32)
+    parser.add_argument("--lambda_region", type=float, default=0.0)
+    parser.add_argument("--region_vol_size", type=int, default=64)
+    parser.add_argument("--region_loss_interval", type=int, default=1)
+    parser.add_argument("--region_organs", type=str, default="2,3,4,5,6,7,8,9")
     args = parser.parse_args(sys.argv[1:])
     # fmt: on
 
@@ -598,6 +723,12 @@ if __name__ == "__main__":
         args.debug_metrics_csv,
         args.disable_densify,
         args.disable_prune,
+        args.lambda_coarse_anchor,
+        args.coarse_anchor_size,
+        args.lambda_region,
+        args.region_vol_size,
+        args.region_loss_interval,
+        args.region_organs,
     )
 
     # All done
