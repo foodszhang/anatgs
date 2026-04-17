@@ -44,7 +44,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--patient_dir", required=True, help="Processed patient dir with phase_*.npy")
     ap.add_argument("--n_projections", type=int, required=True)
-    ap.add_argument("--n_breath_cycles", type=float, default=12.0)
+    ap.add_argument("--n_breath_cycles", type=float, default=1.0)
     ap.add_argument("--irregular", action="store_true")
     ap.add_argument("--output", required=True, help="Output projection dir")
     ap.add_argument("--geo_config", default="configs/4d_cbct_geo.yaml")
@@ -103,4 +103,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

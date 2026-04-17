@@ -80,6 +80,7 @@ class ProjectionDataset:
             sod=self.geo.sod,
             sdd=self.geo.sdd,
             n_samples=self.geo.n_samples,
+            volume_size_mm=self.geo.volume_size_mm,
         )
         points_unit = world_to_unit(points_world, volume_size_mm=self.geo.volume_size_mm).clamp(0.0, 1.0)
         return {
@@ -88,4 +89,3 @@ class ProjectionDataset:
             "timestamps": torch.from_numpy(t).to(device=device),
             "target": torch.from_numpy(target).to(device=device)[:, None],
         }
-

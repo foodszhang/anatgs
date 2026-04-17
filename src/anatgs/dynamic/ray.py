@@ -20,6 +20,22 @@ def _source_and_detector(
     return src, det_center, det_x, det_y
 
 
+def ray_aabb_intersect(src: torch.Tensor, ray_dir: torch.Tensor, box_half: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return near/far ray params for intersection with axis-aligned box [-h,h]^3."""
+    h = float(box_half)
+    inv_d = 1.0 / (ray_dir + 1e-9)
+    t1 = (-h - src) * inv_d
+    t2 = (h - src) * inv_d
+    t_min = torch.minimum(t1, t2).amax(dim=-1)
+    t_max = torch.maximum(t1, t2).amin(dim=-1)
+    t_near = t_min.clamp(0.0, 1.0)
+    t_far = t_max.clamp(0.0, 1.0)
+    valid = t_far > t_near
+    t_near = torch.where(valid, t_near, torch.zeros_like(t_near))
+    t_far = torch.where(valid, t_far, torch.zeros_like(t_far))
+    return t_near, t_far
+
+
 def build_ray_batch(
     angles: torch.Tensor,
     u_idx: torch.Tensor,
@@ -31,6 +47,7 @@ def build_ray_batch(
     sod: float,
     sdd: float,
     n_samples: int,
+    volume_size_mm: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return sampled points [B,S,3] in world coordinates and delta [B]."""
     src, det_center, det_x, det_y = _source_and_detector(angles, sod=sod, sdd=sdd)
@@ -38,14 +55,15 @@ def build_ray_batch(
     vv = (v_idx.float() - (det_h - 1) * 0.5) * float(det_spacing_h)
     det = det_center + uu[:, None] * det_x + vv[:, None] * det_y
     ray = det - src
-    tau = torch.linspace(0.0, 1.0, int(n_samples), device=angles.device, dtype=angles.dtype)[None, :, None]
-    pts = src[:, None, :] + tau * ray[:, None, :]
-    seg_len = torch.linalg.norm(ray, dim=-1).clamp_min(1e-8)
-    delta = seg_len / max(int(n_samples) - 1, 1)
+    t_near, t_far = ray_aabb_intersect(src, ray, box_half=float(volume_size_mm) * 0.5)
+    tau_norm = torch.linspace(0.0, 1.0, int(n_samples), device=angles.device, dtype=angles.dtype)[None, :]
+    tau = t_near[:, None] + (t_far - t_near)[:, None] * tau_norm
+    pts = src[:, None, :] + tau[:, :, None] * ray[:, None, :]
+    seg_len = torch.linalg.norm(ray, dim=-1).clamp_min(1e-8) * (t_far - t_near).clamp_min(0.0)
+    delta = seg_len.clamp_min(1e-8) / max(int(n_samples) - 1, 1)
     return pts, delta
 
 
 def world_to_unit(points_world: torch.Tensor, volume_size_mm: float) -> torch.Tensor:
     """Map world mm coordinates from [-size/2, size/2] to [0,1]."""
     return points_world / float(volume_size_mm) + 0.5
-

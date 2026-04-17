@@ -206,9 +206,19 @@ def main() -> None:
             ckpt = out_dir / f"model_iter_{it}.pt"
             torch.save({"iter": it, "model": model.state_dict(), "cfg": cfg}, ckpt)
 
-    # Export phase snapshots for eval_4d.py
+    # Export phase snapshots for eval_4d.py.
+    # If data was generated with multiple breathing cycles, map phase p to the
+    # matching timestamp in the first cycle to keep phase/time alignment.
+    n_cycles = 1.0
+    data_meta = Path(args.data).with_name("meta.json")
+    if data_meta.exists():
+        with data_meta.open("r", encoding="utf-8") as f:
+            n_cycles = float((json.load(f) or {}).get("n_breath_cycles", 1.0))
+    n_cycles = max(n_cycles, 1e-8)
+    export_t_values: list[float] = []
     for p in range(10):
-        t = p / 10.0
+        t = (p / 10.0) / n_cycles
+        export_t_values.append(float(t))
         vol = query_volume(model, t_value=t, resolution=int(args.volume_res)).detach().cpu().numpy().astype(np.float32)
         np.save(out_dir / f"pred_phase_{p:02d}.npy", vol)
     with (out_dir / "meta.json").open("w", encoding="utf-8") as f:
@@ -229,6 +239,8 @@ def main() -> None:
                 "contrast_ref_volume": contrast_ref_volume,
                 "time_mode": args.time_mode,
                 "phase_filter": args.phase_filter,
+                "export_n_breath_cycles": n_cycles,
+                "export_t_values": export_t_values,
             },
             f,
             indent=2,
