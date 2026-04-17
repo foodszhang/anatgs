@@ -15,3 +15,7 @@ FIPS_raw
 FIPS_processed
 other_scripts
 results/geometry_vis/
+results/*.csv
+results/*.md
+results/*/
+r2_gaussian/submodules/simple-knn

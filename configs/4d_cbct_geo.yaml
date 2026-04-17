@@ -1,0 +1,9 @@
+nVoxel: [256, 256, 256]
+sVoxel: [384.0, 384.0, 384.0]
+nDetector: [256, 256]
+dDetector: [1.5, 1.5]
+DSO: 750.0
+DSD: 1200.0
+offOrigin: [0.0, 0.0, 0.0]
+offDetector: [0.0, 0.0]
+

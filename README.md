@@ -101,6 +101,36 @@ We have converted our datasets to NAF format for your convenience. You can find 
 
 ## 3. Running
 
+### 3.0 Experimental 4D-CBCT pipeline (phase-free)
+
+This repo includes an experimental continuous-time 4D pipeline under `src/anatgs/dynamic/` with entrypoints:
+
+```sh
+# 1) preprocess one 4D patient (phase_*.npy)
+python scripts/prep_4d_lung.py --input <raw_patient_dir> --output data/4d_lung/processed/patient001 --target_size 256
+
+# 2) generate time-stamped projection bundle
+python scripts/gen_4d_projections.py \
+  --patient_dir data/4d_lung/processed/patient001 \
+  --n_projections 360 \
+  --n_breath_cycles 12 \
+  --geo_config configs/4d_cbct_geo.yaml \
+  --output data/4d_lung/projections/patient001_360v
+
+# 3) train phase-free continuous-time field
+python train_4d.py \
+  --data data/4d_lung/projections/patient001_360v/bundle.npz \
+  --config configs/4d_continuous.yaml \
+  --geo_config configs/4d_cbct_geo.yaml \
+  --output output/patient001_360v_continuous
+
+# 4) evaluate per-phase metrics
+python scripts/eval_4d.py \
+  --pred_dir output/patient001_360v_continuous \
+  --gt_dir data/4d_lung/processed/patient001 \
+  --output results/patient001_360v_continuous_eval.csv
+```
+
 ### 3.1 Initialization (optional)
 
 We have included initialization files in our dataset. You can skip this step if using our dataset.

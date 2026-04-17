@@ -1,0 +1,26 @@
+model:
+  use_tcnn: true
+  time_enc: pe
+  time_n_freqs: 6
+  hidden_dim: 64
+  hash_levels: 12
+  hash_feat_per_level: 2
+  hash_log2_size: 17
+  hash_base_resolution: 8
+  hash_per_level_scale: 1.5
+
+train:
+  iterations: 120
+  batch_size: 2048
+  lr: 0.001
+  n_samples: 96
+  lambda_temporal: 0.001
+  projection_mode: line_integral
+  grad_clip: 1.0
+  projection_scale: 100.0
+  lambda_contrast: 0.0
+  contrast_ref_volume: ""
+  contrast_points: 8192
+  contrast_interval: 10
+  eval_every: 30
+  save_every: 120
