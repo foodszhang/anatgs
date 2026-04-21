@@ -5,8 +5,8 @@ model:
   hidden_dim: 128
   use_signal: false
   signal_dim: 5
-  use_motion_field: false
-  use_svf: false
+  use_motion_field: true
+  use_svf: true
   svf_steps: 7
   max_velocity: 0.10
   hash_levels: 16
@@ -16,22 +16,19 @@ model:
   hash_per_level_scale: 1.4472
 
 train:
-  iterations: 50000
-  batch_size: 4096
+  iterations: 2000
+  batch_size: 2048
   lr: 0.001
-  n_samples: 128
+  n_samples: 96
   lambda_temporal: 0.001
   projection_mode: line_integral
   lambda_contrast: 0.0
-  lambda_bi: 0.0
-  lambda_mf: 0.0
-  contrast_ref_volume: ""
-  contrast_points: 8192
-  contrast_interval: 10
+  lambda_bi: 0.01
+  lambda_mf: 0.001
   bi_interval: 20
   bi_samples: 4
-  bi_volume_res: 28
+  bi_volume_res: 24
   manifold_warmup: 100
-  manifold_points: 8192
-  eval_every: 1000
-  save_every: 5000
+  manifold_points: 4096
+  eval_every: 100
+  save_every: 500

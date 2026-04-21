@@ -124,11 +124,27 @@ python train_4d.py \
   --geo_config configs/4d_cbct_geo.yaml \
   --output output/patient001_360v_continuous
 
+# 3b) BreathField-style signal/SVF training (M1+M2+M3+M5 toggles)
+python train_4d.py \
+  --data data/4d_lung/projections/patient001_360v/bundle.npz \
+  --config configs/4d_breathfield_smoke.yaml \
+  --geo_config configs/4d_cbct_geo.yaml \
+  --use_signal --use_svf --signal_dim 5 \
+  --lambda_bi 0.01 --lambda_mf 0.001 \
+  --output output/patient001_360v_breathfield
+
 # 4) evaluate per-phase metrics
 python scripts/eval_4d.py \
   --pred_dir output/patient001_360v_continuous \
   --gt_dir data/4d_lung/processed/patient001 \
   --output results/patient001_360v_continuous_eval.csv
+
+# Optional motion metrics (Jacobian folding + inverse consistency)
+python scripts/eval_4d.py \
+  --pred_dir output/patient001_360v_breathfield \
+  --gt_dir data/4d_lung/processed/patient001 \
+  --model_ckpt output/patient001_360v_breathfield/model_iter_2000.pt \
+  --output results/patient001_360v_breathfield_eval.csv
 ```
 
 ### 3.1 Initialization (optional)

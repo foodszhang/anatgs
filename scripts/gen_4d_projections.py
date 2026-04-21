@@ -9,6 +9,12 @@ from pathlib import Path
 import numpy as np
 import yaml
 
+import sys
+
+sys.path.append("./src")
+
+from anatgs.dynamic.signal import decompose_surrogate
+
 try:
     import tigre
 except Exception:  # pragma: no cover
@@ -57,6 +63,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     phase_vols = _load_phases(patient_dir)
+    phase_vols_xyz = [np.transpose(v, (2, 1, 0)).copy() for v in phase_vols]
     with open(args.geo_config, "r", encoding="utf-8") as f:
         geo = _build_geo(yaml.safe_load(f) or {})
 
@@ -64,26 +71,35 @@ def main() -> None:
     timestamps = np.linspace(0.0, 1.0, int(args.n_projections), endpoint=False, dtype=np.float32)
     projections: list[np.ndarray] = []
     phase_indices: list[int] = []
+    surrogate_signal: list[float] = []
     n_phases = len(phase_vols)
 
     for angle, t in zip(angles, timestamps):
         if args.irregular:
             breath_phase = (t * float(args.n_breath_cycles) + 0.1 * rng.normal()) % 1.0
+            amp = 1.0 + 0.15 * rng.normal()
         else:
             breath_phase = (t * float(args.n_breath_cycles)) % 1.0
+            amp = 1.0
         p = int(breath_phase * n_phases) % n_phases
-        proj = tigre.Ax(phase_vols[p], geo, np.array([angle], dtype=np.float32))
+        proj = tigre.Ax(phase_vols_xyz[p], geo, np.array([angle], dtype=np.float32))[:, ::-1, :]
         projections.append(np.asarray(proj[0], dtype=np.float32))
         phase_indices.append(p)
+        surrogate_signal.append(float(amp * np.sin(2.0 * np.pi * breath_phase)))
 
     projections_np = np.stack(projections, axis=0)
     phase_indices_np = np.asarray(phase_indices, dtype=np.int16)
+    surrogate_signal_np = np.asarray(surrogate_signal, dtype=np.float32)
+    signal_features_np, surrogate_norm_np = decompose_surrogate(surrogate_signal_np, timestamps)
     np.savez_compressed(
         out_dir / "bundle.npz",
         projections=projections_np,
         angles=angles,
         timestamps=timestamps,
         phase_indices=phase_indices_np,
+        surrogate_signal=surrogate_norm_np.astype(np.float32),
+        surrogate_time=timestamps,
+        signal_features=signal_features_np.astype(np.float32),
     )
     with (out_dir / "meta.json").open("w", encoding="utf-8") as f:
         json.dump(

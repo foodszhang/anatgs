@@ -11,27 +11,27 @@ model:
   max_velocity: 0.10
   hash_levels: 16
   hash_feat_per_level: 2
-  hash_log2_size: 19
+  hash_log2_size: 21
   hash_base_resolution: 16
   hash_per_level_scale: 1.4472
 
 train:
-  iterations: 50000
+  iterations: 2000
   batch_size: 4096
   lr: 0.001
   n_samples: 128
-  lambda_temporal: 0.001
+  lambda_temporal: 0.0
   projection_mode: line_integral
   lambda_contrast: 0.0
   lambda_bi: 0.0
   lambda_mf: 0.0
   contrast_ref_volume: ""
-  contrast_points: 8192
-  contrast_interval: 10
+  contrast_points: 0
+  contrast_interval: 1
   bi_interval: 20
   bi_samples: 4
   bi_volume_res: 28
   manifold_warmup: 100
-  manifold_points: 8192
-  eval_every: 1000
-  save_every: 5000
+  manifold_points: 0
+  eval_every: 500
+  save_every: 2000
